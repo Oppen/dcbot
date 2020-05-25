@@ -15,4 +15,5 @@ Para ejecutarlo localmente basta con instalar Go y ejecutar `go run`.
 El nuevo bot está preparado para correr fácilmente en Docker, usando el
 Dockerfile y creando ciertos archivos de configuración para el runtime.
 El mismo se encarga de compilar el programa.
-<-- TODO: expandir esto! -->
+
+[//]: # (TODO: expandir esto!)
