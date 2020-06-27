@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api"
+	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/Oppen/dcbot/bot"
 	"github.com/Oppen/dcbot/module"
@@ -43,7 +43,6 @@ func (s *Stat) HandleCommand(b *bot.Bot, u *tgbotapi.Update) {
 	mem := memStats.HeapAlloc
 
 	// FIXME: there's probably a less repetitive way that isn't too ugly
-	//
 	switch {
 	case mem > 10 * 1024*1024*1024:
 		msgText += fmt.Sprintf("Memoria: %.2fGB\n", float64(mem) / (1024*1024*1024))
@@ -54,6 +53,8 @@ func (s *Stat) HandleCommand(b *bot.Bot, u *tgbotapi.Update) {
 	default:
 		msgText += fmt.Sprintf("Memoria: %dB\n", mem)
 	}
+
+	// TODO: rusage for system and user CPU time
 
 	msg := tgbotapi.NewMessage(u.Message.Chat.ID, msgText)
 	if _, err := b.Send(msg); err != nil {

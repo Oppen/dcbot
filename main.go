@@ -13,23 +13,21 @@ package main
  */
 import (
 	"log"
-	"net/url"
 	"os"
 	"os/signal"
 	"time"
 	"sync"
 	"syscall"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api"
+	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/Oppen/dcbot/bot"
 	"github.com/Oppen/dcbot/module"
-	"github.com/Oppen/dcbot/util/zjson"
+	"github.com/Oppen/dcbot/zjson"
 
 	// Handlers, for initialization only.
+	_ "github.com/Oppen/dcbot/godbolt"
 	_ "github.com/Oppen/dcbot/stat"
-	//_ "github.com/Oppen/dcbot/asm"
-	//_ "github.com/Oppen/dcbot/plan"
 )
 
 const (
@@ -51,21 +49,10 @@ type BatchWorkerState struct {
 type WorkerState struct {
 	WorkQueue <-chan tgbotapi.Update
 	BatchQueue chan<- tgbotapi.Update
+	Shutdown <-chan struct{}
 }
 
 func BatchWorker(bot *bot.Bot, worker *BatchWorkerState) {
-	// TODO: acknowledge messages as appropriate.
-	// Keep in mind requests not fully completed should probably *not* be
-	// acknowledged. An option is to persist relevant information for
-	// unfinished requests, and restart them or expire them as with other
-	// messages.
-	// TODO: possibly fire up goroutines before attempting IO, so this one
-	// can serve the next job. It would probably be difficult to track, tho.
-	// Could be done passing enough metadata for logging and answering and
-	// adding to a waitgroup to be waited for at exit.
-	// It may be better to do in the specific handlers, or to register IO
-	// handlers to send IO tasks, to avoid repetition and passing WG to the
-	// regular handlers.
 	for {
 		work, ok := <-worker.BatchQueue
 		_ = work
@@ -74,29 +61,28 @@ func BatchWorker(bot *bot.Bot, worker *BatchWorkerState) {
 			break
 		}
 	}
-	log.Println("Los metalúrgicos hacen paro")
 }
 
 func Worker(b *bot.Bot, worker *WorkerState) {
 	for {
-		update, ok := <-worker.WorkQueue
-		// Channel was closed, that's our queue to exit.
-		if !ok {
-			break
+		var update tgbotapi.Update
+		// While 'master' properly closes the update channel when
+		// `StopReceivingUpdates` is called, no released version does.
+		// Because of this, we implement our own shutdown channel as usual.
+		select {
+		case <-worker.Shutdown:
+			return
+		case update = <-worker.WorkQueue:
 		}
-		log.Println("Update")
 		if update.Message == nil {
 			continue
 		}
-		log.Println("Mensaje")
 		if date := time.Unix(int64(update.Message.Date), 0); bot.Expired(date, b.Config.TTL) {
 			continue
 		}
-		log.Println("No expirado")
 		if !update.Message.IsCommand() {
 			continue
 		}
-		log.Println("Comando")
 		handler := module.GetCommandHandler(update.Message.Command())
 		if handler.TakesLong() {
 			select {
@@ -106,23 +92,22 @@ func Worker(b *bot.Bot, worker *WorkerState) {
 			}
 			continue
 		}
-		log.Println("Instantáneo")
 		handler.HandleCommand(b, &update)
 	}
-	log.Println("Los obreros hacen paro")
 }
 
 func main() {
-	// FIXME
+	// FIXME: pick an appropriate logger
 	log := log.New(os.Stderr, "", 0)
 
-	// Saca todo relativo al directorio indicado acá.
 	rootDir := os.Getenv("DCBOT_ROOT")
 
 	var b bot.Bot
 	if err := zjson.Load(rootDir + "bot_config.zz", &b); err != nil {
 		log.Fatal("Config read failed:", err)
 	}
+
+	b.Config.Root = rootDir
 
 	log.Printf("%+v\n", b)
 
@@ -150,7 +135,7 @@ func main() {
 
 	log.Printf("Authorized on account %s", b.Self.UserName)
 
-	// Let's register our handlers... Not like before :^)
+	// Let's register our handlers
 	module.InitModules(&b)
 
 	if b.Config.TTL == nil {
@@ -171,23 +156,17 @@ func main() {
 
 	// FIXME: single element un-acknowledged poll to set the filter.
 	// This should go away once the Go API merges the filter feature.
-	_, _ = b.MakeRequest("getUpdates", url.Values{
-		"offset": []string{"0"},
-		"limit": []string{"1"},
-		"timeout": []string{"0"},
-		"allowed_updates": []string{"[message]"},
+	_, _ = b.MakeRequest("getUpdates", tgbotapi.Params{
+		"offset": "0",
+		"limit": "1",
+		"timeout": "0",
+		"allowed_updates": "[message]",
 	})
 
 	u := tgbotapi.NewUpdate(0)
 	// May cause long shutdown, but reduces traffic and CPU usage
 	// TODO: use the config
-	u.Timeout = 120
-
-	b.Buffer = WorkQueueLen
-	updateQueue, err := b.GetUpdatesChan(u)
-	if err != nil {
-		log.Fatal("GetUpdatesChan failed:", err)
-	}
+	u.Timeout = 300
 
 	batchQueue := make(chan tgbotapi.Update, BatchQueueLen)
 	batchesState := make([]BatchWorkerState, nBatches)
@@ -203,6 +182,10 @@ func main() {
 	WorkerWg := sync.WaitGroup{}
 	WorkerWg.Add(nWorkers)
 
+	b.Buffer = WorkQueueLen
+	updateQueue := b.GetUpdatesChan(u)
+
+	shutdown := make(chan struct{})
 	workersState := make([]WorkerState, nWorkers)
 	for i := 0; i < nWorkers; i++ {
 		go func(i int) {
@@ -210,6 +193,7 @@ func main() {
 
 			workersState[i].WorkQueue = updateQueue
 			workersState[i].BatchQueue = batchQueue
+			workersState[i].Shutdown = shutdown
 			Worker(&b, &workersState[i])
 		}(i)
 	}
@@ -232,12 +216,10 @@ func main() {
 	// processed before we quit.
 	// `StopReceivingUpdates` closes the API update channel, so no need to
 	// do it manually.
-	log.Println("Let's stop")
 	b.StopReceivingUpdates()
-	log.Println("Wait the workers")
+	close(shutdown)
 	WorkerWg.Wait()
 	close(batchQueue)
-	log.Println("Wait the heavy workers")
 	BatchWg.Wait()
 
 	// FIXME:
